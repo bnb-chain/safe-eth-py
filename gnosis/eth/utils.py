@@ -1,4 +1,3 @@
-import warnings
 from secrets import token_bytes
 from typing import Tuple, Union
 
@@ -9,6 +8,17 @@ from eth_typing import AnyAddress, ChecksumAddress, HexStr
 from eth_utils import to_normalized_address
 from hexbytes import HexBytes
 from sha3 import keccak_256
+from web3.types import TxParams, Wei
+
+
+def get_empty_tx_params() -> TxParams:
+    """
+    :return: Empty tx params, so calls like `build_transaction` don't call the RPC trying to get information
+    """
+    return {
+        "gas": Wei(1),
+        "gasPrice": Wei(1),
+    }
 
 
 def fast_keccak(value: bytes) -> bytes:
@@ -26,7 +36,7 @@ def fast_keccak_hex(value: bytes) -> HexStr:
     than calling `digest()` and then `hex()`
 
     :param value:
-    :return: Keccak256 used by ethereum as an hex string (not 0x prefixed)
+    :return: Keccak256 used by ethereum as a hex string (not 0x prefixed)
     """
     return HexStr(keccak_256(value).hexdigest())
 
@@ -174,7 +184,6 @@ def mk_contract_address(address: Union[str, bytes], nonce: int) -> ChecksumAddre
 def mk_contract_address_2(
     from_: Union[str, bytes], salt: Union[str, bytes], init_code: Union[str, bytes]
 ) -> ChecksumAddress:
-
     """
     Generate expected contract address when using EVM CREATE2.
 
@@ -195,21 +204,3 @@ def mk_contract_address_2(
     init_code_hash = fast_keccak(init_code)
     contract_address = fast_keccak(HexBytes("ff") + from_ + salt + init_code_hash)
     return fast_bytes_to_checksum_address(contract_address[12:])
-
-
-def generate_address_2(
-    from_: Union[str, bytes], salt: Union[str, bytes], init_code: Union[str, bytes]
-) -> ChecksumAddress:
-    """
-    .. deprecated:: use mk_contract_address_2
-
-    :param from_:
-    :param salt:
-    :param init_code:
-    :return:
-    """
-    warnings.warn(
-        "`generate_address_2` is deprecated, use `mk_contract_address_2`",
-        DeprecationWarning,
-    )
-    return mk_contract_address_2(from_, salt, init_code)
