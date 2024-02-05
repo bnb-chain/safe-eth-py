@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 from copy import deepcopy
@@ -6,6 +7,7 @@ from typing import Any
 import pytest
 import requests
 from eth_account.signers.local import LocalAccount
+from eth_typing import ChecksumAddress
 from hexbytes import HexBytes
 from web3 import Web3
 from web3.contract import Contract
@@ -20,9 +22,7 @@ def just_test_if_mainnet_node() -> str:
         return mainnet_node_url
 
     if not mainnet_node_url:
-        pytest.skip(
-            "Mainnet node not defined, cannot test oracles", allow_module_level=True
-        )
+        pytest.skip("Mainnet node not defined, skipping test", allow_module_level=True)
     else:
         try:
             response = requests.post(
@@ -75,6 +75,30 @@ def just_test_if_polygon_node() -> str:
     return polygon_node_url
 
 
+def skip_on(exception, reason="Test skipped due to a controlled exception"):
+    """
+    Decorator to skip a test if an exception is raised instead of failing it
+
+    :param exception:
+    :param reason:
+    :return:
+    """
+
+    def decorator_func(f):
+        @functools.wraps(f)
+        def wrapper(*args, **kwargs):
+            try:
+                # Run the test
+                return f(*args, **kwargs)
+            except exception:
+                pytest.skip(reason)
+
+        return wrapper
+
+    return decorator_func
+
+
+# TODO Move this to EthereumClient
 def send_tx(w3: Web3, tx: TxParams, account: LocalAccount) -> bytes:
     tx["from"] = account.address
     if "nonce" not in tx:
@@ -87,60 +111,38 @@ def send_tx(w3: Web3, tx: TxParams, account: LocalAccount) -> bytes:
 
     if "gas" not in tx:
         tx["gas"] = w3.eth.estimate_gas(tx)
-    else:
-        tx["gas"] *= 2
 
     signed_tx = account.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(bytes(signed_tx.rawTransaction))
     tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    assert tx_receipt.status == 1, "Error with tx %s - %s" % (tx_hash.hex(), tx)
+    assert tx_receipt["status"] == 1, "Error with tx %s - %s" % (tx_hash.hex(), tx)
     return tx_hash
-
-
-def deploy_example_erc20(
-    w3: Web3,
-    amount: int,
-    owner: str,
-    deployer: str = None,
-    account: LocalAccount = None,
-) -> Contract:
-    return deploy_erc20(
-        w3, "Uxio", "UXI", owner, amount, deployer=deployer, account=account
-    )
 
 
 def deploy_erc20(
     w3: Web3,
+    account: LocalAccount,
     name: str,
     symbol: str,
-    owner: str,
+    owner: ChecksumAddress,
     amount: int,
     decimals: int = 18,
-    deployer: str = None,
-    account: LocalAccount = None,
 ) -> Contract:
-    if account:
-        erc20_contract = get_example_erc20_contract(w3)
-        tx = erc20_contract.constructor(
-            name, symbol, decimals, owner, amount
-        ).build_transaction(
-            {
-                "nonce": w3.eth.get_transaction_count(
-                    account.address, block_identifier="pending"
-                )
-            }
-        )
-        signed_tx = account.sign_transaction(tx)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-    else:
-        deployer = deployer or w3.eth.accounts[0]
-        erc20_contract = get_example_erc20_contract(w3)
-        tx_hash = erc20_contract.constructor(
-            name, symbol, decimals, owner, amount
-        ).transact({"from": deployer})
+    erc20_contract = get_example_erc20_contract(w3)
+    tx = erc20_contract.constructor(
+        name, symbol, decimals, owner, amount
+    ).build_transaction(
+        {
+            "nonce": w3.eth.get_transaction_count(
+                account.address, block_identifier="pending"
+            )
+        }
+    )
+    signed_tx = account.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
 
     tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    erc20_address = tx_receipt.contractAddress
+    erc20_address = tx_receipt["contractAddress"]
     deployed_erc20 = get_example_erc20_contract(w3, erc20_address)
     assert deployed_erc20.functions.balanceOf(owner).call() == amount
     return deployed_erc20
@@ -173,6 +175,6 @@ def to_json_with_hexbytes(o: Any) -> str:
     Convert RPC calls with nested bytes/Hexbytes to json and compare. Useful for RPC calls
 
     :param o:
-    :return: Object as JSON with Hexbytes/bytes parsed correctly as an hex string
+    :return: Object as JSON with Hexbytes/bytes parsed correctly as a hex string
     """
     return json.dumps(bytes_to_str(o), indent=4, sort_keys=True)

@@ -23,7 +23,7 @@ from ..contracts import (
     get_uniswap_v2_pair_contract,
     get_uniswap_v2_router_contract,
 )
-from ..utils import fast_bytes_to_checksum_address, fast_keccak
+from ..utils import fast_bytes_to_checksum_address, fast_keccak, get_empty_tx_params
 from .abis.aave_abis import AAVE_ATOKEN_ABI
 from .abis.balancer_abis import balancer_pool_abi
 from .abis.cream_abis import cream_ctoken_abi
@@ -85,7 +85,6 @@ class UniswapOracle(PriceOracle):
         EthereumNetwork.MAINNET: "0xc0a47dFe034B400B47bDaD5FecDa2621de6c4d95",
         EthereumNetwork.RINKEBY: "0xf5D915570BC477f9B8D6C0E980aA81757A3AaC36",
         EthereumNetwork.ROPSTEN: "0x9c83dCE8CA20E9aAF9D3efc003b2ea62aBC08351",
-        EthereumNetwork.KOVAN: "0xD3E51Ef092B2845f10401a0159B2B96e8B6c3D30",
         EthereumNetwork.GOERLI: "0x6Ce570d02D73d4c384b46135E87f8C592A8c86dA",
     }
 
@@ -151,7 +150,7 @@ class UniswapOracle(PriceOracle):
             "id": 0,
         }
         erc20 = get_erc20_contract(self.w3, token_address)
-        params = {"gas": 0, "gasPrice": 0}
+        params = get_empty_tx_params()
         decimals_data = erc20.functions.decimals().build_transaction(params)["data"]
         token_balance_data = erc20.functions.balanceOf(
             uniswap_exchange_address

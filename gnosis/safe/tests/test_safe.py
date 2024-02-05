@@ -4,12 +4,11 @@ from django.test import TestCase
 
 from eth_account import Account
 from hexbytes import HexBytes
-from packaging.version import Version
 from web3 import Web3
 
 from gnosis.eth.constants import GAS_CALL_DATA_BYTE, NULL_ADDRESS
-from gnosis.eth.contracts import get_safe_contract
-from gnosis.eth.utils import get_eth_address_with_key
+from gnosis.eth.contracts import get_safe_contract, get_sign_message_lib_contract
+from gnosis.eth.utils import get_empty_tx_params, get_eth_address_with_key
 
 from ..exceptions import (
     CannotEstimateGas,
@@ -17,7 +16,7 @@ from ..exceptions import (
     CouldNotPayGasWithToken,
     InvalidInternalTx,
 )
-from ..safe import Safe, SafeOperation
+from ..safe import Safe, SafeOperation, SafeV100, SafeV111, SafeV130, SafeV141
 from ..signatures import signature_to_bytes, signatures_to_bytes
 from .safe_test_case import SafeTestCaseMixin
 
@@ -25,10 +24,25 @@ logger = logging.getLogger(__name__)
 
 
 class TestSafe(SafeTestCaseMixin, TestCase):
+    @property
+    def safe_contract(self):
+        """
+        :return: Last Safe Contract available
+        """
+        return self.safe_contract_V1_4_1
+
+    def deploy_test_safe(self, *args, **kwargs):
+        """
+        :param args:
+        :param kwargs:
+        :return: Deployed Safe Contract with the last version available
+        """
+        return super().deploy_test_safe_v1_4_1(*args, **kwargs)
+
     def test_create(self):
         owners = [self.ethereum_test_account.address]
         threshold = 1
-        master_copy_address = self.safe_contract_address
+        master_copy_address = self.safe_contract.address
 
         ethereum_tx_sent = Safe.create(
             self.ethereum_client,
@@ -36,7 +50,7 @@ class TestSafe(SafeTestCaseMixin, TestCase):
             master_copy_address,
             owners,
             threshold,
-            proxy_factory_address=self.proxy_factory_contract_address,
+            proxy_factory_address=self.proxy_factory_contract.address,
         )
         safe = Safe(ethereum_tx_sent.contract_address, self.ethereum_client)
         self.assertEqual(safe.retrieve_master_copy_address(), master_copy_address)
@@ -63,30 +77,14 @@ class TestSafe(SafeTestCaseMixin, TestCase):
             safe.check_funds_for_tx_gas(safe_tx_gas, base_gas, gas_price, NULL_ADDRESS)
         )
 
-    def test_estimate_safe_creation(self):
-        number_owners = 4
-        gas_price = self.gas_price
-        payment_token = NULL_ADDRESS
-        safe_creation_estimate = Safe.estimate_safe_creation(
-            self.ethereum_client,
-            self.safe_contract_V0_0_1_address,
-            number_owners,
-            gas_price,
-            payment_token,
-        )
-        self.assertGreater(safe_creation_estimate.gas_price, 0)
-        self.assertGreater(safe_creation_estimate.gas, 0)
-        self.assertGreater(safe_creation_estimate.payment, 0)
-        self.assertEqual(safe_creation_estimate.payment_token, payment_token)
-
     def test_estimate_safe_creation_2(self):
         number_owners = 4
         gas_price = self.gas_price
         payment_token = NULL_ADDRESS
         safe_creation_estimate = Safe.estimate_safe_creation_2(
             self.ethereum_client,
-            self.safe_contract_address,
-            self.proxy_factory_contract_address,
+            self.safe_contract.address,
+            self.proxy_factory_contract.address,
             number_owners,
             gas_price,
             payment_token,
@@ -101,8 +99,8 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         threshold = 1
         safe_creation_2 = Safe.build_safe_create2_tx(
             self.ethereum_client,
-            self.safe_contract_address,
-            self.proxy_factory_contract_address,
+            self.safe_contract.address,
+            self.proxy_factory_contract.address,
             salt_nonce,
             owners,
             threshold,
@@ -115,9 +113,8 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         )
 
     def test_retrieve_master_copy_address(self):
-        # Test with master copy starting by 0x00
-        master_copy_address = "0x004e2e9E6D637b8138B022D16083093Cb2Ee76aa"
-        ethereum_tx_send = self.proxy_factory.deploy_proxy_contract(
+        master_copy_address = self.safe_contract.address
+        ethereum_tx_send = self.proxy_factory.deploy_proxy_contract_with_nonce(
             self.ethereum_test_account, master_copy_address
         )
         safe = Safe(ethereum_tx_send.contract_address, self.ethereum_client)
@@ -275,7 +272,7 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         funder = funder_account.address
         safe_balance_ether = 0.02
         safe_balance = self.w3.to_wei(safe_balance_ether, "ether")
-        owner_account = self.create_account(initial_ether=safe_balance_ether)
+        owner_account = self.create_and_fund_account(initial_ether=safe_balance_ether)
         owner = owner_account.address
 
         safe = self.deploy_test_safe(
@@ -476,7 +473,7 @@ class TestSafe(SafeTestCaseMixin, TestCase):
             {"from": self.w3.eth.accounts[0]}
         )
         tx_receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-        nester = self.w3.eth.contract(address=tx_receipt.contractAddress, abi=abi)
+        nester = self.w3.eth.contract(address=tx_receipt["contractAddress"], abi=abi)
 
         safe = self.deploy_test_safe(
             owners=[self.ethereum_test_account.address],
@@ -546,14 +543,8 @@ class TestSafe(SafeTestCaseMixin, TestCase):
             deployed_erc20 = self.deploy_example_erc20(100, Account.create().address)
             transfer_data = deployed_erc20.functions.transfer(
                 to, 200
-            ).build_transaction({"gas": 0})["data"]
+            ).build_transaction(get_empty_tx_params())["data"]
             safe.estimate_tx_gas_with_web3(deployed_erc20.address, value, transfer_data)
-
-    def test_estimate_tx_operational_gas(self):
-        for threshold in range(2, 5):
-            safe = self.deploy_test_safe(threshold=threshold, number_owners=6)
-            tx_signature_gas_estimation = safe.estimate_tx_operational_gas(0)
-            self.assertGreaterEqual(tx_signature_gas_estimation, 20000)
 
     def test_retrieve_code(self):
         self.assertEqual(
@@ -567,20 +558,14 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         self.assertEqual(safe.retrieve_fallback_handler(), random_fallback_handler)
 
     def test_retrieve_guard(self):
-        # Test guard in a Safe < 1.2
         owner_account = Account.create()
-        safe_v1_1_1 = self.deploy_test_safe_v1_1_1()
-        self.assertEqual(safe_v1_1_1.retrieve_guard(), NULL_ADDRESS)
-        self.assertLess(Version(safe_v1_1_1.retrieve_version()), Version("1.3.0"))
-
         safe = self.deploy_test_safe(owners=[owner_account.address])
         self.assertEqual(safe.retrieve_guard(), NULL_ADDRESS)
-        self.assertGreaterEqual(Version(safe.retrieve_version()), Version("1.3.0"))
 
-        guard_address = Account.create().address
+        guard_address = self.deploy_example_guard()
         set_guard_data = HexBytes(
             safe.contract.functions.setGuard(guard_address).build_transaction(
-                {"gas": 1, "gasPrice": 1}
+                get_empty_tx_params()
             )["data"]
         )
         set_guard_tx = safe.build_multisig_tx(safe.address, 0, set_guard_data)
@@ -591,50 +576,52 @@ class TestSafe(SafeTestCaseMixin, TestCase):
     def test_retrieve_info(self):
         owners = [Account.create().address for _ in range(2)]
         threshold = 2
-        safe_v1_0_0 = self.deploy_test_safe_v1_0_0(owners=owners, threshold=threshold)
-        safe_v1_3_0 = self.deploy_test_safe(owners=owners, threshold=threshold)
+        safe = self.deploy_test_safe(owners=owners, threshold=threshold)
 
-        for safe, master_copy_address in (
-            (safe_v1_0_0, self.safe_contract_V1_0_0_address),
-            (safe_v1_3_0, self.safe_contract_address),
-        ):
-            self.assertEqual(safe.retrieve_master_copy_address(), master_copy_address)
-            self.assertEqual(safe.retrieve_nonce(), 0)
-            self.assertCountEqual(safe.retrieve_owners(), owners)
-            self.assertEqual(safe.retrieve_threshold(), threshold)
-            self.assertEqual(safe.retrieve_modules(), [])
+        self.assertEqual(
+            safe.retrieve_master_copy_address(), self.safe_contract.address
+        )
+        self.assertEqual(safe.retrieve_nonce(), 0)
+        self.assertCountEqual(safe.retrieve_owners(), owners)
+        self.assertEqual(safe.retrieve_threshold(), threshold)
+        self.assertEqual(safe.retrieve_modules(), [])
 
-            # Versions must be semantic, like 0.1.0, so we count 3 points
-            self.assertTrue(safe.retrieve_version().count("."), 3)
+        # Versions must be semantic, like 0.1.0, so we count 3 points
+        self.assertTrue(safe.retrieve_version().count("."), 3)
 
-            for owner in owners:
-                self.assertTrue(safe.retrieve_is_owner(owner))
+        for owner in owners:
+            self.assertTrue(safe.retrieve_is_owner(owner))
 
     def test_retrieve_all_info(self):
         owners = [Account.create().address for _ in range(2)]
         threshold = 2
+        safe = self.deploy_test_safe(owners=owners, threshold=threshold)
+
+        safe_info = safe.retrieve_all_info()
+        self.assertEqual(safe_info.master_copy, self.safe_contract.address)
+        self.assertEqual(safe_info.nonce, 0)
+        self.assertCountEqual(safe_info.owners, owners)
+        self.assertEqual(safe_info.threshold, threshold)
+        self.assertEqual(safe_info.modules, [])
+
+        invalid_address = Account.create().address
+        invalid_safe = Safe(invalid_address, self.ethereum_client)
+        with self.assertRaisesMessage(CannotRetrieveSafeInfoException, invalid_address):
+            invalid_safe.retrieve_all_info()
+
+    def test_safe_instance(self):
+        owners = [Account.create().address for _ in range(2)]
+        threshold = 2
         safe_v1_0_0 = self.deploy_test_safe_v1_0_0(owners=owners, threshold=threshold)
-        safe_v1_3_0 = self.deploy_test_safe(owners=owners, threshold=threshold)
+        self.assertTrue(isinstance(safe_v1_0_0, SafeV100))
+        safe_v1_1_1 = self.deploy_test_safe_v1_1_1(owners=owners, threshold=threshold)
+        self.assertTrue(isinstance(safe_v1_1_1, SafeV111))
+        safe_v1_3_0 = self.deploy_test_safe_v1_3_0(owners=owners, threshold=threshold)
+        self.assertTrue(isinstance(safe_v1_3_0, SafeV130))
+        safe_v1_4_1 = self.deploy_test_safe_v1_4_1(owners=owners, threshold=threshold)
+        self.assertTrue(isinstance(safe_v1_4_1, SafeV141))
 
-        for safe, master_copy_address in (
-            (safe_v1_0_0, self.safe_contract_V1_0_0_address),
-            (safe_v1_3_0, self.safe_contract_address),
-        ):
-            safe_info = safe.retrieve_all_info()
-            self.assertEqual(safe_info.master_copy, master_copy_address)
-            self.assertEqual(safe_info.nonce, 0)
-            self.assertCountEqual(safe_info.owners, owners)
-            self.assertEqual(safe_info.threshold, threshold)
-            self.assertEqual(safe_info.modules, [])
-
-            invalid_address = Account.create().address
-            invalid_safe = Safe(invalid_address, self.ethereum_client)
-            with self.assertRaisesMessage(
-                CannotRetrieveSafeInfoException, invalid_address
-            ):
-                invalid_safe.retrieve_all_info()
-
-    def test_retrieve_modules(self):
+    def test_retrieve_modules_new(self):
         safe = self.deploy_test_safe(owners=[self.ethereum_test_account.address])
         safe_contract = safe.contract
         module_address = Account.create().address
@@ -663,44 +650,23 @@ class TestSafe(SafeTestCaseMixin, TestCase):
                 tx_sender_private_key=self.ethereum_test_account.key,
                 tx_gas_price=self.gas_price,
             )
-
         self.assertCountEqual(
             safe.retrieve_modules(pagination=1), [module_address] + more_modules
         )
 
-    def test_retrieve_modules_below_v1_1_1(self):
-        safe_v1_0_0 = self.deploy_test_safe_v1_0_0(
-            owners=[self.ethereum_test_account.address]
-        )
-        safe_contract = safe_v1_0_0.contract
-        module_address = Account.create().address
-        self.assertEqual(safe_v1_0_0.retrieve_modules(), [])
-
-        tx = safe_contract.functions.enableModule(module_address).build_transaction(
-            {"from": self.ethereum_test_account.address, "gas": 0, "gasPrice": 0}
-        )
-        safe_tx = safe_v1_0_0.build_multisig_tx(safe_v1_0_0.address, 0, tx["data"])
-        safe_tx.sign(self.ethereum_test_account.key)
-        safe_tx.execute(
-            tx_sender_private_key=self.ethereum_test_account.key,
-            tx_gas_price=self.gas_price,
-        )
-        self.assertEqual(safe_v1_0_0.retrieve_modules(), [module_address])
-        self.assertEqual(safe_v1_0_0.retrieve_all_info().modules, [module_address])
-
     def test_retrieve_modules_unitialized_safe(self):
         """
-        Unitialized Safes will return `[[], '0x0000000000000000000000000000000000000000']` when calling
-        `getModulesPaginated`, as `SENTINEL_ADDRESS` is only set when initialized
+        Unitialized Safes from V1.4.1 will revert
         """
 
-        ethereum_tx_sent = self.proxy_factory.deploy_proxy_contract(
+        ethereum_tx_sent = self.proxy_factory.deploy_proxy_contract_with_nonce(
             self.ethereum_test_account,
             self.safe_contract.address,
             initializer=b"",
         )
         safe = Safe(ethereum_tx_sent.contract_address, self.ethereum_client)
-        self.assertEqual(safe.retrieve_modules(), [])
+        with self.assertRaisesMessage(ValueError, "revert"):
+            self.assertEqual(safe.retrieve_modules(), [])
         self.assertEqual(safe.retrieve_all_info().modules, [])
 
     def test_retrieve_is_hash_approved(self):
@@ -726,17 +692,38 @@ class TestSafe(SafeTestCaseMixin, TestCase):
             )
         )
 
-    def test_retrieve_is_message_signed(self):
+    def test_retrieve_is_message_signed_v1_1_1(self):
         safe = self.deploy_test_safe_v1_1_1(owners=[self.ethereum_test_account.address])
         safe_contract = safe.contract
         message = b"12345"
-        message_hash = safe_contract.functions.getMessageHash(message).call()
+        message_hash = safe.get_message_hash(message)
+        self.assertFalse(safe.retrieve_is_message_signed(message_hash))
         sign_message_data = HexBytes(
-            safe_contract.functions.signMessage(message).build_transaction({"gas": 0})[
-                "data"
-            ]
+            safe_contract.functions.signMessage(message).build_transaction(
+                get_empty_tx_params()
+            )["data"]
         )
         safe_tx = safe.build_multisig_tx(safe.address, 0, sign_message_data)
+        safe_tx.sign(self.ethereum_test_account.key)
+        safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.key)
+        self.assertTrue(safe.retrieve_is_message_signed(message_hash))
+
+    def test_retrieve_is_message_signed(self):
+        safe = self.deploy_test_safe(owners=[self.ethereum_test_account.address])
+        sign_message_lib_address = self.deploy_sign_message_lib()
+        sign_message_contract = get_sign_message_lib_contract(self.w3, safe.address)
+        message = b"12345"
+        message_hash = safe.get_message_hash(message)
+        self.assertFalse(safe.retrieve_is_message_signed(message_hash))
+        sign_message_data = sign_message_contract.functions.signMessage(
+            message
+        ).build_transaction(get_empty_tx_params())["data"]
+        safe_tx = safe.build_multisig_tx(
+            sign_message_lib_address,
+            0,
+            sign_message_data,
+            SafeOperation.DELEGATE_CALL.value,
+        )
         safe_tx.sign(self.ethereum_test_account.key)
         safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.key)
         self.assertTrue(safe.retrieve_is_message_signed(message_hash))
@@ -774,7 +761,8 @@ class TestSafe(SafeTestCaseMixin, TestCase):
     def test_send_previously_approved_tx(self):
         number_owners = 4
         accounts = [
-            self.create_account(initial_ether=0.01) for _ in range(number_owners)
+            self.create_and_fund_account(initial_ether=0.01)
+            for _ in range(number_owners)
         ]
         accounts.sort(key=lambda x: x.address.lower())
         owners = [account.address for account in accounts]
